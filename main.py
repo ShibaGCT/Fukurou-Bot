@@ -2,6 +2,8 @@ import discord
 import sqlite3
 import yt_dlp
 import asyncio
+from dotenv import load_dotenv
+import os
 import time
 from datetime import datetime, date, timedelta
 
@@ -457,4 +459,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 client = Client(command_prefix="!", intents=intents)
 
-client.run('MTUzNDgzNzEyMTU2OTc4ODAwNQ.GsgBe8.neoNIy_q7hAAOnmKpUEvij59FyLADOSPYpyYUw')
+load_dotenv()
+
+client.run(os.getenv("TOKEN"))
