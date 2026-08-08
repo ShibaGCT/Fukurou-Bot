@@ -13,8 +13,8 @@ cursor = db.cursor()
 active_timers = {}
 
 cursor.execute("""CREATE TABLE IF NOT EXISTS todo (id INTEGER PRIMARY KEY AUTOINCREMENT,user_id INTEGER,task TEXT,completed INTEGER)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS stats(user_id INTEGER PRIMARY KEY, level INTEGER DEFAULT 0, xp INTEGER DEFAULT 0, focus_time INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, daily_limit INTEGER DEFAULT 5, last_reset TEXT)""")
-cursor.execute("""CREATE TABLE IF NOT EXISTS timer(user_id INTEGER PRIMARY KEY, time INTEGER DEFAULT 0, timer_type TEXT)""")
+cursor.execute("""CREATE TABLE IF NOT EXISTS stats(user_id INTEGER PRIMARY KEY, level INTEGER DEFAULT 0, xp INTEGER DEFAULT 0, focus_time INTEGER DEFAULT 0, streak INTEGER DEFAULT 0, daily_limit INTEGER DEFAULT 5, last_reset TEXT, last_activity TEXT)""")
+cursor.execute("""CREATE TABLE IF NOT EXISTS timer(user_id INTEGER PRIMARY KEY, time INTEGER DEFAULT 0, timer_type TEXT, total INTEGER DEFAULT 0)""")
 db.commit()
 
 #CHECK NEW USER
@@ -39,7 +39,7 @@ def addEXP(amount, user_id):
     level, xp = cursor.fetchone()
 
     while True:
-        requiredXp = 1000 + (150 * level)
+        requiredXp = 500 + (150 * level)
         if xp < requiredXp:
             cursor.execute("UPDATE stats SET xp = ?, level = ? WHERE user_id = ?",(xp, level, user_id))
             db.commit()
@@ -58,8 +58,8 @@ async def countdown(user_id, seconds, timer_type, channel, user):
         while seconds > 0:
 
             cursor.execute(
-                "INSERT OR REPLACE INTO timer(user_id, time, timer_type) VALUES (?, ?, ?)",
-                (user_id, seconds, timer_type)
+                "INSERT OR REPLACE INTO timer(user_id, time, timer_type, total) VALUES (?, ?, ?, ?)",
+                (user_id, seconds, timer_type, total_seconds)
             )
             db.commit()
 
@@ -86,6 +86,8 @@ async def countdown(user_id, seconds, timer_type, channel, user):
         )
         db.commit()
 
+        update_streak(user_id)
+
         await channel.send(
             f"⏰ {user} **Your {timer_type} session has ended!**\n"
             f"[+{round(total_seconds/60)*10}exp]"
@@ -102,6 +104,40 @@ async def countdown(user_id, seconds, timer_type, channel, user):
     finally:
         if user_id in active_timers:
             del active_timers[user_id]
+
+#Update streak
+def update_streak(user_id):
+    cursor.execute(
+        "SELECT streak, last_activity FROM stats WHERE user_id = ?",
+        (user_id,)
+    )
+    streak, last_activity = cursor.fetchone()
+
+    today = date.today()
+
+    if last_activity is not None:
+        last_activity = date.fromisoformat(last_activity)
+
+        if last_activity == today:
+            return
+
+        elif last_activity == today - timedelta(days=1):
+            streak += 1
+
+        else:
+            streak = 1
+    else:
+        streak = 1
+
+    cursor.execute(
+        """
+        UPDATE stats
+        SET streak = ?, last_activity = ?
+        WHERE user_id = ?
+        """,
+        (streak, str(today), user_id)
+    )
+    db.commit()
 
 async def stopwatch(user_id, timer_type):
 
@@ -128,6 +164,7 @@ async def stopwatch(user_id, timer_type):
         raise
 
     finally:
+        print("Removing stopwatch:", user_id)
         if user_id in active_timers:
             del active_timers[user_id]
 
@@ -138,6 +175,24 @@ class Client(discord.Client):
         await self.change_presence(
             activity=discord.Game(name="fuku!help")
         )   
+
+    async def on_voice_state_update(self, member, before, after):
+        if member.bot:
+            return
+
+        voice = member.guild.voice_client
+        if voice is None or voice.channel is None:
+            return
+
+        # Count only human members
+        humans = [m for m in voice.channel.members if not m.bot]
+
+        if len(humans) == 0:
+            if voice.is_playing():
+                voice.stop()
+
+            await voice.disconnect()
+            print("**Disconnected because nobody was left in VC.**")
 
     async def on_message(self, message):
         #MESSAGE PARTS
@@ -155,8 +210,9 @@ class Client(discord.Client):
         
         if message.content == "fuku!help":
             helpEmbed.add_field(name= "fuku!todo", value= "View your to-do list", inline= False)
-            helpEmbed.add_field(name= "fuku! + [Task Name]", value= "Add task to your to-do list", inline= False)
-            helpEmbed.add_field(name= "fuku! - [Task Name]", value= "Complete task from your to-do list", inline= False)
+            helpEmbed.add_field(name= "fuku!todo + [Task Name]", value= "Add task to your to-do list", inline= False)
+            helpEmbed.add_field(name= "fuku!todo - [Task Name]", value= "Complete task from your to-do list", inline= False)
+            helpEmbed.add_field(name= "fuku!todo clear", value= "Clear your to-do list", inline= False)
             helpEmbed.add_field(name= "fuku!focus", value= "Start a countdown timer", inline= False)
             helpEmbed.add_field(name= "fuku!sw", value= "Start a stopwatch", inline= False)
             helpEmbed.add_field(name= "fuku!time", value= "Check status of your timer", inline= False)
@@ -167,13 +223,20 @@ class Client(discord.Client):
         elif message.content == "fuku!p":
             user_id = message.author.id
 
-            cursor.execute("SELECT level, xp, focus_time, streak FROM stats WHERE user_id = ?", (user_id,))
-            level, xp, focustime, streak = cursor.fetchone()
+            cursor.execute("SELECT level, xp, focus_time, streak, last_activity FROM stats WHERE user_id = ?", (user_id,))
+            level, xp, focustime, streak, last_activity = cursor.fetchone()
 
             profileEmbed = discord.Embed(title= f"{message.author.display_name}'s Profile", description=None, color=discord.Colour.random())
             profileEmbed.add_field(name=f"👾 Level: {level}", value="", inline=True)
-            profileEmbed.add_field(name=f"⭐ Exp: {xp}/{1000+(150*level)}", value="", inline=True)
+            profileEmbed.add_field(name=f"⭐ Exp: {xp}/{500+(150*level)}", value="", inline=True)
             profileEmbed.add_field(name=f"🕑 Total Time Focused: {focustime} minutes", value="", inline=True)
+
+            if last_activity:
+                last_activity = date.fromisoformat(last_activity)
+
+                if last_activity < date.today() - timedelta(days=1):
+                    streak = 0
+            
             profileEmbed.add_field(name=f"🔥 {streak}x Streak", value="", inline=True)
 
             await message.channel.send(embed=profileEmbed)
@@ -217,18 +280,13 @@ class Client(discord.Client):
             db.commit()
 
             today = date.today()
-            cursor.execute("SELECT daily_limit, last_reset, streak FROM stats WHERE user_id = ?", (user_id,))
-            daily_limit, last_reset, streak = cursor.fetchone()
+            cursor.execute("SELECT daily_limit, last_reset FROM stats WHERE user_id = ?", (user_id,))
+            daily_limit, last_reset = cursor.fetchone()
 
             if last_reset is not None:
                 last_reset = date.fromisoformat(last_reset)
-                if last_reset < today - timedelta(days=1):
-                    cursor.execute("UPDATE stats SET streak = 0 WHERE user_id = ?", (user_id,))
-                    db.commit()
 
             if last_reset != today:
-                cursor.execute("UPDATE stats SET streak = streak + 1 WHERE user_id = ?", (user_id,))
-                db.commit()
                 daily_limit = 5
                 cursor.execute("UPDATE stats SET daily_limit = ?, last_reset = ? WHERE user_id = ?", (daily_limit, str(today), user_id))
                 db.commit()
@@ -239,6 +297,7 @@ class Client(discord.Client):
                 daily_limit -= 1
                 cursor.execute("UPDATE stats SET daily_limit = ?, last_reset = ? WHERE user_id = ?", (daily_limit, str(today), user_id))
                 db.commit()
+                update_streak(user_id)
                 addEXP(250, message.author.id)
                 await message.channel.send(f"**Task completed: {tasktxt} [+250 exp]**")
 
@@ -305,7 +364,7 @@ class Client(discord.Client):
 
             if timer is None:
                 await message.channel.send(
-                    "❌ You don't have an active timer."
+                    "❌ **You don't have an active timer.**"
                 )
                 return
 
@@ -341,13 +400,15 @@ class Client(discord.Client):
 
         elif message.content == "fuku!timer stop":
 
+            print("Current timers:", active_timers)
+            print("Looking for:", user_id)
+
             if user_id not in active_timers:
-                await message.channel.send("❌ You don't have an active timer.")
+                await message.channel.send("❌ **You don't have an active timer.**")
                 return
 
-            # Get elapsed time BEFORE deleting
             cursor.execute(
-                "SELECT time, timer_type FROM timer WHERE user_id = ?",
+                "SELECT time, timer_type, total FROM timer WHERE user_id = ?",
                 (user_id,)
             )
             timer = cursor.fetchone()
@@ -355,12 +416,16 @@ class Client(discord.Client):
             active_timers[user_id].cancel()
 
             if timer:
-                seconds, timer_type = timer
-                total_seconds = seconds
+                stored_time, timer_type, total = timer
 
-                hours = seconds // 3600
-                minutes = (seconds % 3600) // 60
-                seconds = seconds % 60
+                if timer_type == "Stopwatch":
+                    total_seconds = stored_time
+                else:
+                    total_seconds = total - stored_time
+
+                hours = total_seconds // 3600
+                minutes = (total_seconds % 3600) // 60
+                seconds = total_seconds % 60
 
                 cursor.execute(
                     """
@@ -371,6 +436,8 @@ class Client(discord.Client):
                     (round(total_seconds/60), user_id)
                 )
                 db.commit()
+
+                update_streak(user_id)
 
                 addEXP((round(total_seconds / 60)*10), message.author.id)
 
@@ -392,13 +459,13 @@ class Client(discord.Client):
 
             if user_id in active_timers:
                 await message.channel.send(
-                    "⏱️ You already have a timer running!"
+                    "⏱️ **You already have a timer running!**"
                 )
                 return
 
 
             await message.channel.send(
-                "⏱️ Stopwatch started!"
+                "⏱️ **Stopwatch started!**"
             )
 
 
@@ -410,6 +477,7 @@ class Client(discord.Client):
             )
 
             active_timers[user_id] = task
+            print("Added:", active_timers)
 
         elif message.content == "fuku!lofi":
             if message.author.voice:
@@ -421,7 +489,7 @@ class Client(discord.Client):
                     voice = await channel.connect()
 
                 ydl_opts = {
-                    "format": "bestaudio/best",
+                    "format": "251/bestaudio",
                     "quiet": True,
                     "noplaylist": True,
                     "js_runtimes": {
@@ -436,10 +504,10 @@ class Client(discord.Client):
 
                 audio_url = info["url"]
 
-                source = discord.FFmpegPCMAudio(audio_url)
+                source = discord.FFmpegOpusAudio(audio_url, options="-vn -filter:a volume=0.8")
 
-                voice.play(source, after=lambda e: voice.play(discord.FFmpegPCMAudio(audio_url))
-)
+                voice.play(source)
+
                 await message.channel.send("**🎵 Playing lofi!**")
 
             else:
